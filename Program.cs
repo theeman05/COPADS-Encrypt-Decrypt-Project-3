@@ -13,6 +13,8 @@ namespace System
     using System.Security.Cryptography;
     using System.IO;
     using System.Text.Json;
+    using System.Text;
+    using System.Diagnostics;
 
     /// <summary>
     /// Extension methods for the BigInteger class providing prime checking, factor, and sqrt calculating.
@@ -95,25 +97,50 @@ namespace System
         }
     }
 
-    class PrivateKey
+    class KeyBase
     {
-        string[] email { get; }
-        string key { get; }
+        private string SavePath { get; }
+        public string key { get; }
 
-        static PrivateKey ParseFromDirectory()
+        private static string GetSaveLocation(string clsName)
         {
-            return Program.DeserializeFromFile<PrivateKey>(Path.Combine(Environment.CurrentDirectory, "private.key"));
+            return Path.Combine(Environment.CurrentDirectory, clsName.ToLower()[..^3] + ".key");
         }
 
-        public PrivateKey(string key)
+        public static T? ParseFromDirectory<T>() where T : KeyBase, new()
         {
-            this.email = Array.Empty<string>();
+            return Program.DeserializeFromFile<T>(GetSaveLocation(typeof(T).Name));
+        }
+
+        public KeyBase(string key)
+        {
             this.key = key;
+            SavePath = GetSaveLocation(GetType().Name);
         }
 
         public void Store()
         {
-            Program.SerializeToFile(this, Path.Combine(Environment.CurrentDirectory, "private.key"));
+            Program.SerializeToFile(this, SavePath);
+        }
+    }
+
+    class PrivateKey : KeyBase
+    {
+        public string[] email { get; }
+
+        public PrivateKey(string key) : base(key)
+        {
+            email = Array.Empty<string>();
+        }
+    }
+
+    class PublicKey : KeyBase
+    {
+        public string email { get; }
+
+        public PublicKey(string key) : base(key)
+        {
+            email = string.Empty;
         }
     }
 
@@ -133,17 +160,22 @@ namespace System
 
         private static readonly int BATCH_SIZE = 500;
 
+        public static string Base64Encode(string? input)
+        {
+            if (input == null) return string.Empty;
+            return Convert.ToBase64String(Encoding.UTF8.GetBytes(input));
+        }
+
         public static void SerializeToFile<T>(T obj, string filePath)
         {
+            Console.WriteLine(JsonSerializer.Serialize(obj));
             File.WriteAllText(filePath, JsonSerializer.Serialize(obj));
         }
 
-        public static T DeserializeFromFile<T>(string filePath)
+        public static T? DeserializeFromFile<T>(string filePath)
         {
-            if (File.Exists(filePath))
-                return JsonSerializer.Deserialize<T>(File.ReadAllText(filePath));
-            else
-                throw new FileNotFoundException($"File not found: {filePath}");
+            if (File.Exists(filePath)) return JsonSerializer.Deserialize<T>(File.ReadAllText(filePath));
+            throw new FileNotFoundException($"File not found: {filePath}");
         }
 
         /// Concatenates the optional parameters for the user to see.
@@ -177,18 +209,13 @@ namespace System
             return true;
         }
 
-        /// Generates a keypair of size <keySize> bits and stores it locally on the disk.
-        private static void KeyGen(int keySize) // TODO
+        private static BigInteger GenerateProbablyPrime(RandomNumberGenerator rng, int bytes)
         {
-            if (keySize < 32 || keySize > Math.Pow(2, 16)) // Key size must be positive, and a multiple of 8 starting at 32, and less than or eq to 2^16.
-                throw new Exception();
-
-            RandomNumberGenerator rng = RandomNumberGenerator.Create();
             BigInteger? probablyPrimeKey = null;
             while (probablyPrimeKey == null)
             {
                 Task.Run(() => { // Utilizes thread pool for parallel generation
-                    byte[] randomBytes = new byte[keySize];
+                    byte[] randomBytes = new byte[bytes];
                     for (int i = 0; i < BATCH_SIZE && probablyPrimeKey == null; i++)
                     {
                         rng.GetBytes(randomBytes);
@@ -199,9 +226,45 @@ namespace System
                     }
                 });
             }
+
+            return (BigInteger) probablyPrimeKey;
+        }
+
+        /// Generates a keypair of size <keySize> bits and stores it locally on the disk.
+        private static void KeyGen(int keySize) // TODO
+        {
+            if (keySize < 32 || keySize > Math.Pow(2, 16)) // Key size must be positive, and a multiple of 8 starting at 32, and less than or eq to 2^16.
+                throw new Exception();
+
+            RandomNumberGenerator rng = RandomNumberGenerator.Create();
+            byte[] randN = new byte[1];
+            rng.GetBytes(randN);
+
+            // Get the directional sign for size
+            int sign = randN[0] / byte.MaxValue <= .5 ? -1 : 1;
+            rng.GetBytes(randN); // Get a random number for us to calculate size with.
+            int pSize = (int) (keySize * (double) (.5 + sign * (.2 + .1 * randN[0] / byte.MaxValue)));
+            BigInteger? probPrimePrivate = null, probPrimePublic = null;
+
+            // Asynchronusly run number gens
+            Task[] tasks = {
+                Task.Run(() => { probPrimePrivate = GenerateProbablyPrime(rng, pSize); }),
+                Task.Run(() => { probPrimePublic = GenerateProbablyPrime(rng, keySize - pSize); })
+            };
+
+            // Wait for tasks to complete
+            foreach (Task t in tasks)
+            {
+                while (!t.IsCompleted) { }
+            }
+
             rng.Dispose();
 
+
+
             // Step 2: Store the keypair locally on the disk.
+            PrivateKey privateKey = new(Base64Encode(probPrimePrivate.ToString()));
+            privateKey.Store();
         }
 
         private static void SendKey(string email) // TODO
