@@ -142,7 +142,11 @@ namespace System
             if (string.IsNullOrWhiteSpace(fileName)) 
                 fileName = typeof(T).Name.ToLower()[..^3];
             string filePath = GetSaveLocation(fileName);
-            return File.Exists(filePath) ? JsonSerializer.Deserialize<T>(File.ReadAllText(filePath)) : default;
+            try
+            {
+                return File.Exists(filePath) ? JsonSerializer.Deserialize<T>(File.ReadAllText(filePath)) : default;
+            }
+            catch (Exception) { return default; }
         }
 
         /// Creates and encrpyts a key from the given eOrD and n values.
@@ -307,6 +311,7 @@ namespace System
         [JsonConstructor]
         public Message(string email, string content, string messageTime)
         {
+            _ = messageTime; // Unused, but needed for deserialization.
             this.email = email;
             this.content = content;
         }
@@ -463,11 +468,18 @@ namespace System
         public static async Task GetKeyAsync(string email)
         {
             // Retrieve the public key for the given email from the server.
-            PublicKey? publicKey = await ServerInterface.GetTAsync<PublicKey>(PublicKey.ENDPOINT, email);
-            if (publicKey != null) 
-                publicKey.Store(email); // Save the public key to the local disk with the email.
-            else 
-                Console.WriteLine($"No public key found on the server for '{email}'.");
+            try
+            {
+                PublicKey? publicKey = await ServerInterface.GetTAsync<PublicKey>(PublicKey.ENDPOINT, email);
+                if (publicKey != null)
+                    publicKey.Store(email); // Save the public key to the local disk with the email.
+                else
+                    Console.WriteLine($"No public key found on the server for '{email}'.");
+            }
+            catch (Exception)
+            {
+                Console.WriteLine($"There was a network error getting the public key for '{email}'.");
+            }
         }
 
         /// Encrypts, encodes, then sends a message to the server.
@@ -502,16 +514,23 @@ namespace System
                 if (privateKey != null)
                 {
                     // Retrieve the message from the server.
-                    Message? message = await ServerInterface.GetTAsync<Message>(Message.ENDPOINT, email);
-                    if (message != null && message.content != null)
+                    try
                     {
-                        // Extract key d and n from the private key.
-                        privateKey.ExtractKey(out BigInteger d, out BigInteger n);
+                        Message? message = await ServerInterface.GetTAsync<Message>(Message.ENDPOINT, email);
+                        if (message != null && message.content != null)
+                        {
+                            // Extract key d and n from the private key.
+                            privateKey.ExtractKey(out BigInteger d, out BigInteger n);
 
-                        // Decrypt the message using the private key and display after converting to string. (ciphertext^d mod n = plaintext)
-                        Console.WriteLine(Encoding.UTF8.GetString(BigInteger.ModPow(new(Convert.FromBase64String(message.content)), d, n).ToByteArray()));
+                            // Decrypt the message using the private key and display after converting to string. (ciphertext^d mod n = plaintext)
+                            Console.WriteLine(Encoding.UTF8.GetString(BigInteger.ModPow(new(Convert.FromBase64String(message.content)), d, n).ToByteArray()));
+                        }
+                        else Console.WriteLine($"No message found on the server for '{email}'.");
                     }
-                    else Console.WriteLine($"No message found on the server for '{email}'.");
+                    catch (Exception)
+                    {
+                        Console.WriteLine($"There was a network error getting the message for '{email}'.");
+                    }
                 }
                 else Console.WriteLine($"There was an error getting the message for '{email}'.");
             }
